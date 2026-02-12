@@ -1,0 +1,184 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum PaymentIntentStatus {
+  requires_confirmation
+  processing
+  requires_capture
+  succeeded
+  canceled
+  failed
+}
+
+enum ChargeStatus {
+  authorized
+  partially_captured
+  captured
+  voided
+  failed
+}
+
+enum RefundStatus {
+  pending
+  succeeded
+  failed
+}
+
+enum SignatureStatus {
+  valid
+  invalid
+}
+
+enum WebhookProcessingStatus {
+  pending
+  processed
+  failed
+}
+
+enum OutboxStatus {
+  PENDING
+  PROCESSING
+  PROCESSED
+  FAILED
+}
+
+model Merchant {
+  id             String          @id @default(cuid())
+  name           String
+  createdAt      DateTime        @default(now())
+  apiKeys        ApiKey[]
+  paymentIntents PaymentIntent[]
+  idempotencyKeys IdempotencyKey[]
+  auditLogs      AuditLog[]
+}
+
+model ApiKey {
+  id        String   @id @default(cuid())
+  merchantId String
+  keyHash   String   @unique
+  label     String?
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  merchant Merchant @relation(fields: [merchantId], references: [id], onDelete: Restrict)
+
+  @@index([merchantId])
+}
+
+model PaymentIntent {
+  id               String              @id @default(cuid())
+  merchantId       String
+  amount           Int
+  currency         String
+  status           PaymentIntentStatus
+  customerRef      String?
+  metadata         Json?
+  paymentMethodToken String?
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+
+  merchant Merchant @relation(fields: [merchantId], references: [id], onDelete: Restrict)
+  charges  Charge[]
+
+  @@index([merchantId, createdAt])
+}
+
+model Charge {
+  id               String      @id @default(cuid())
+  paymentIntentId  String
+  provider         String
+  providerChargeId String      @unique
+  authorizedAmount Int
+  capturedAmount   Int         @default(0)
+  status           ChargeStatus
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
+
+  paymentIntent PaymentIntent @relation(fields: [paymentIntentId], references: [id], onDelete: Restrict)
+  refunds      Refund[]
+
+  @@index([paymentIntentId])
+}
+
+model Refund {
+  id               String       @id @default(cuid())
+  chargeId         String
+  amount           Int
+  reason           String?
+  status           RefundStatus
+  providerRefundId String?
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+
+  charge Charge @relation(fields: [chargeId], references: [id], onDelete: Restrict)
+
+  @@index([chargeId])
+}
+
+model IdempotencyKey {
+  id               String   @id @default(cuid())
+  merchantId       String
+  idempotencyKey   String
+  requestHash      String
+  responseSnapshot Json
+  expiresAt        DateTime
+  createdAt        DateTime @default(now())
+
+  merchant Merchant @relation(fields: [merchantId], references: [id], onDelete: Restrict)
+
+  @@unique([merchantId, idempotencyKey])
+  @@index([expiresAt])
+}
+
+model ProviderWebhookEvent {
+  id               String                  @id @default(cuid())
+  provider         String
+  eventId          String
+  eventType        String
+  signatureStatus  SignatureStatus
+  payloadHash      String
+  payload          Json
+  processingStatus WebhookProcessingStatus @default(pending)
+  receivedAt       DateTime                @default(now())
+  processedAt      DateTime?
+
+  @@unique([provider, eventId])
+  @@index([processingStatus, receivedAt])
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  merchantId String?
+  actorType  String
+  actorId    String?
+  action     String
+  entityType String
+  entityId   String
+  details    Json?
+  createdAt  DateTime @default(now())
+
+  merchant Merchant? @relation(fields: [merchantId], references: [id], onDelete: Restrict)
+
+  @@index([merchantId, createdAt])
+}
+
+model OutboxEvent {
+  id            String      @id @default(cuid())
+  eventType     String
+  aggregateType String
+  aggregateId   String
+  payload       Json
+  status        OutboxStatus @default(PENDING)
+  attempts      Int          @default(0)
+  nextRunAt     DateTime     @default(now())
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  @@index([status, nextRunAt])
+}
