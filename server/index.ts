@@ -46,39 +46,52 @@ async function getAccessToken(): Promise<string> {
     return cachedAccessToken
   }
 
-  const gatewayBaseUrl = environment === 'production'
-    ? 'https://api-gateway.transak.com'
-    : 'https://api-gateway-stg.transak.com'
-  const partnersBaseUrl = environment === 'production'
+  // Use the correct refresh token endpoint per Transak docs:
+  // https://api-stg.transak.com/partners/api/v2/refresh-token
+  const refreshBaseUrl = environment === 'production'
     ? 'https://api.transak.com'
     : 'https://api-stg.transak.com'
 
-  const refreshPayload = {
+  const refreshUrl = `${refreshBaseUrl}/partners/api/v2/refresh-token`
+
+  console.log(`[Transak] Requesting access token from: ${refreshUrl}`)
+  console.log(`[Transak] Using API Key: ${apiKey.substring(0, 10)}...`)
+  console.log(`[Transak] Using API Secret: ${apiSecret.substring(0, 10)}...`)
+
+  const tokenResponse = await fetch(refreshUrl, {
+    method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'api-secret': apiSecret.trim(),
     },
     body: JSON.stringify({ apiKey: apiKey.trim() }),
-  }
-
-  // Try gateway refresh first (same host as session API)
-  let tokenResponse = await fetch(`${gatewayBaseUrl}/api/v2/auth/refresh-token`, {
-    method: 'POST',
-    ...refreshPayload,
   })
-
-  // Fallback to partners API if gateway has no refresh endpoint
-  if (tokenResponse.status === 404) {
-    tokenResponse = await fetch(`${partnersBaseUrl}/partners/api/v2/refresh-token`, {
-      method: 'POST',
-      ...refreshPayload,
-    })
-  }
 
   if (!tokenResponse.ok) {
     const errText = await tokenResponse.text()
-    console.error('Refresh token error:', tokenResponse.status, errText)
-    throw new Error(`Failed to get access token (${tokenResponse.status}): ${errText}`)
+    console.error(`[Transak] Refresh token failed (${tokenResponse.status}):`, errText)
+    
+    // Parse error for better message
+    let errorMessage = `Failed to get access token (${tokenResponse.status})`
+    try {
+      const errJson = JSON.parse(errText)
+      if (errJson.error?.message) {
+        errorMessage = errJson.error.message
+      } else if (errJson.message) {
+        errorMessage = errJson.message
+      }
+    } catch {
+      // Use raw text if not JSON
+    }
+
+    // Specific error hints
+    if (tokenResponse.status === 400) {
+      errorMessage += '\n\n💡 This usually means:\n- API Secret is incorrect or invalid\n- API Secret is the same as API Key (they must be different)\n- Generate a new API Secret from Partner Dashboard → Staging → Developers'
+    } else if (tokenResponse.status === 401) {
+      errorMessage += '\n\n💡 Check that:\n- You selected "Staging" environment in Partner Dashboard\n- API Secret is from the Staging environment (not Production)'
+    }
+
+    throw new Error(errorMessage)
   }
 
   const tokenData = await tokenResponse.json()
@@ -149,11 +162,42 @@ app.post('/api/transak/widget-url', async (req, res) => {
     res.json({ widgetUrl: widgetData.data?.widgetUrl })
   } catch (error: any) {
     console.error('Server error:', error)
-    res.status(500).json({ error: 'Internal server error', message: error.message })
+    
+    // Return user-friendly error messages instead of generic "Internal server error"
+    const errorMessage = error.message || 'Internal server error'
+    const statusCode = errorMessage.includes('API Secret') || errorMessage.includes('API key') ? 400 : 500
+    
+    res.status(statusCode).json({ 
+      error: errorMessage.includes('API Secret') 
+        ? 'Invalid API Secret Configuration'
+        : 'Server Error',
+      message: errorMessage,
+      hint: errorMessage.includes('API Secret') 
+        ? 'Go to Partner Dashboard → Staging → Developers. Copy the "API Secret" field (it is different from the API Key).'
+        : undefined
+    })
   }
+})
+
+// Diagnostic endpoint to check credentials (for debugging)
+app.get('/api/transak/check-credentials', (req, res) => {
+  const apiKey = process.env.VITE_TRANSAK_API_KEY || process.env.TRANSAK_API_KEY
+  const apiSecret = process.env.TRANSAK_API_SECRET
+  const environment = process.env.VITE_TRANSAK_ENV || process.env.TRANSAK_ENV || 'staging'
+
+  res.json({
+    hasApiKey: !!apiKey,
+    hasApiSecret: !!apiSecret,
+    apiKeyPreview: apiKey ? `${apiKey.substring(0, 10)}...` : 'NOT SET',
+    apiSecretPreview: apiSecret ? `${apiSecret.substring(0, 10)}...` : 'NOT SET',
+    apiKeyEqualsSecret: apiKey === apiSecret,
+    environment,
+    warning: apiKey === apiSecret ? '⚠️ API Secret is the same as API Key! They must be different values from Partner Dashboard.' : null
+  })
 })
 
 app.listen(PORT, () => {
   console.log(`🚀 Transak proxy server running on http://localhost:${PORT}`)
   console.log(`📝 Required in .env: VITE_TRANSAK_API_KEY, TRANSAK_API_SECRET, VITE_TRANSAK_ENV`)
+  console.log(`🔍 Check credentials: http://localhost:${PORT}/api/transak/check-credentials`)
 })
